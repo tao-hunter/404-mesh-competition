@@ -66,19 +66,22 @@ RUN pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e402
 # Install Kaolin
 RUN pip install kaolin==0.18.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.8.0_cu128.html
 
-# Install CuMesh
+# Install CuMesh (pinned to specific commit for reproducibility)
 RUN git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/CuMesh --recursive && \
+    cd /tmp/CuMesh && git checkout c4ad6125924fcedfd13f0bd61520ca2d24eb7a87 && cd /app && \
     pip install /tmp/CuMesh --no-build-isolation && \
     rm -rf /tmp/CuMesh
 
-# Install FlexGEMM
+# Install FlexGEMM (pinned to specific commit for reproducibility)
 RUN git clone https://github.com/JeffreyXiang/FlexGEMM.git /tmp/FlexGEMM --recursive && \
+    cd /tmp/FlexGEMM && git checkout 6a184e957e1d3d18763221513b3e810ac1e7c8e8 && cd /app && \
     pip install /tmp/FlexGEMM --no-build-isolation && \
     rm -rf /tmp/FlexGEMM
 
 # Copy o-voxel and install with eigen
 COPY o-voxel /tmp/o-voxel
-RUN git clone --depth 1 --branch 3.4.0 https://gitlab.com/libeigen/eigen.git /tmp/o-voxel/third_party/eigen && \
+RUN git clone https://gitlab.com/libeigen/eigen.git /tmp/o-voxel/third_party/eigen && \
+    cd /tmp/o-voxel/third_party/eigen && git checkout 3147391d946bb4b6c68edd901f2add6ac1f31f8c && cd /app && \
     pip install /tmp/o-voxel --no-build-isolation && \
     rm -rf /tmp/o-voxel
 

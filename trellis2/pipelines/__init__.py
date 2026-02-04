@@ -23,32 +23,27 @@ def __getattr__(name):
     return globals()[name]
 
 
-def from_pretrained(path: str, model_revisions: dict[str, str]):
+def from_pretrained(path: str):
     """
     Load a pipeline from a model folder or a Hugging Face model hub.
 
     Args:
         path: The path to the model. Can be either local path or a Hugging Face model name.
-        model_revisions: Dict mapping repo IDs to their revisions for reproducibility.
     """
     import os
     import json
-    
-    # Get revision for the main repo
-    main_repo_id = '/'.join(path.split('/')[:2])
-    revision = model_revisions.get(main_repo_id)
-    
     is_local = os.path.exists(f"{path}/pipeline.json")
 
     if is_local:
         config_file = f"{path}/pipeline.json"
     else:
         from huggingface_hub import hf_hub_download
-        config_file = hf_hub_download(path, "pipeline.json", revision=revision)
+        from hf_revisions import get_revision
+        config_file = hf_hub_download(path, "pipeline.json", revision=get_revision(path))
 
     with open(config_file, 'r') as f:
         config = json.load(f)
-    return globals()[config['name']].from_pretrained(path, model_revisions=model_revisions)
+    return globals()[config['name']].from_pretrained(path)
 
 
 # For PyLance

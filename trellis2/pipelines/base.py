@@ -19,34 +19,20 @@ class Pipeline:
             model.eval()
 
     @classmethod
-    def from_pretrained(
-        cls,
-        path: str,
-        model_revisions: dict[str, str],
-        config_file: str = "pipeline.json",
-    ) -> "Pipeline":
+    def from_pretrained(cls, path: str, config_file: str = "pipeline.json") -> "Pipeline":
         """
         Load a pretrained model.
-
-        Args:
-            path: The path to the model. Can be either local path or a Hugging Face repository.
-            model_revisions: Dict mapping repo IDs to their revisions.
-            config_file: The name of the config file.
         """
         import os
         import json
-        
-        # Parse the main repo ID and get its revision from model_revisions
-        main_repo_id = '/'.join(path.split('/')[:2])
-        revision = model_revisions[main_repo_id]
-        
         is_local = os.path.exists(f"{path}/{config_file}")
 
         if is_local:
             config_file = f"{path}/{config_file}"
         else:
             from huggingface_hub import hf_hub_download
-            config_file = hf_hub_download(path, config_file, revision=revision)
+            from hf_revisions import get_revision
+            config_file = hf_hub_download(path, config_file, revision=get_revision(path))
 
         with open(config_file, 'r') as f:
             args = json.load(f)['args']
@@ -55,13 +41,10 @@ class Pipeline:
         for k, v in args['models'].items():
             if hasattr(cls, 'model_names_to_load') and k not in cls.model_names_to_load:
                 continue
-            
             try:
-                _models[k] = models.from_pretrained(f"{path}/{v}", revision=revision)
-            except Exception:
-                # External model path
-                external_repo_id = '/'.join(v.split('/')[:2])
-                _models[k] = models.from_pretrained(v, revision=model_revisions[external_repo_id])
+                _models[k] = models.from_pretrained(f"{path}/{v}")
+            except Exception as e:
+                _models[k] = models.from_pretrained(v)
 
         new_pipeline = cls(_models)
         new_pipeline._pretrained_args = args

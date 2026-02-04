@@ -3,19 +3,13 @@ from transformers import AutoModelForImageSegmentation
 import torch
 from torchvision import transforms
 from PIL import Image
+from hf_revisions import get_revision
 
 
 class BiRefNet:
-    def __init__(self, model_name: str = "ZhengPeng7/BiRefNet", revision: str = None):
-        """
-        Initialize BiRefNet background removal model.
-
-        Args:
-            model_name: HuggingFace model name.
-            revision: Specific HuggingFace commit hash for reproducibility.
-        """
+    def __init__(self, model_name: str = "ZhengPeng7/BiRefNet"):
         self.model = AutoModelForImageSegmentation.from_pretrained(
-            model_name, trust_remote_code=True, revision=revision
+            model_name, trust_remote_code=True, revision=get_revision(model_name)
         )
         self.model.eval()
         self.transform_image = transforms.Compose(

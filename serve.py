@@ -1,47 +1,25 @@
 import gc
+import os
 import argparse
 import asyncio
 from io import BytesIO
-from pathlib import Path
 from time import time
-
-import yaml
-import torch
-import uvicorn
 from PIL import Image
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+
+import torch
+import uvicorn
 from loguru import logger
-from fastapi import FastAPI,  UploadFile, File, APIRouter, Form
+from fastapi import FastAPI, UploadFile, File, APIRouter, Form
 from fastapi.responses import Response, StreamingResponse
 from starlette.datastructures import State
 
 import o_voxel
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
-
-
-REQUIRED_MODELS = {
-    "microsoft/TRELLIS.2-4B",
-    "microsoft/TRELLIS-image-large",
-    "ZhengPeng7/BiRefNet",
-    "facebook/dinov3-vitl16-pretrain-lvd1689m",
-}
-
-
-def load_model_versions() -> dict[str, str]:
-    """Load pinned model versions from model_versions.yml."""
-    versions_file = Path(__file__).parent / "model_versions.yml"
-    with open(versions_file) as f:
-        data = yaml.safe_load(f)["huggingface"]
-    
-    # Extract revisions and validate
-    model_versions = {k: v["revision"] for k, v in data.items()}
-    
-    if missing := REQUIRED_MODELS - model_versions.keys():
-        raise ValueError(f"Missing required models in model_versions.yml: {missing}")
-    
-    return model_versions
+from config import settings
+from modules.image_edit import QwenEditModule
 
 
 def get_args() -> argparse.Namespace:
@@ -60,6 +38,7 @@ def clean_vram() -> None:
 
 executor = ThreadPoolExecutor(max_workers=1)
 
+
 class MyFastAPI(FastAPI):
     state: State
     router: APIRouter
@@ -70,20 +49,39 @@ class MyFastAPI(FastAPI):
 async def lifespan(app: MyFastAPI) -> AsyncIterator[None]:
     logger.info("Loading Trellis 2 generator models ...")
     try:
-        model_versions = load_model_versions()
-        logger.info(f"Loaded pinned revisions for {len(model_versions)} models")
-        
-        app.state.trellis_generator = Trellis2ImageTo3DPipeline.from_pretrained(
-            "microsoft/TRELLIS.2-4B",
-            model_versions,
-        )
+        app.state.trellis_generator = Trellis2ImageTo3DPipeline.from_pretrained(settings.trellis_model_id)
         app.state.trellis_generator.to("cuda")
 
     except Exception as e:
-        logger.exception(f"Exception during model loading: {e}")
-        raise SystemExit("Model failed to load → exiting server")
+        logger.exception(f"Exception during Trellis model loading: {e}")
+        raise SystemExit("Trellis model failed to load → exiting server")
+
+    # Initialize Qwen Edit Module (required for image editing)
+    try:
+        logger.info("Loading Qwen Edit model ...")
+        app.state.qwen_edit = QwenEditModule(settings)
+        await app.state.qwen_edit.startup()
+    except Exception as e:
+        logger.exception(f"Exception during Qwen model loading: {e}")
+        raise SystemExit("Qwen model failed to load → exiting server")
+
+    # Warmup with real image to pre-allocate GPU memory
+    logger.info("Warming up pipeline...")
+    try:
+        warmup_image_path = os.path.join(os.path.dirname(__file__), "warmup_image.png")
+        warmup_image = Image.open(warmup_image_path)
+        _ = generation_block(warmup_image, seed=42)
+        clean_vram()
+        logger.info("Warmup complete.")
+    except Exception as e:
+        logger.warning(f"Warmup failed (non-critical): {e}")
+        clean_vram()
 
     yield
+
+    # Cleanup
+    if app.state.qwen_edit is not None:
+        await app.state.qwen_edit.shutdown()
 
 
 app = MyFastAPI(title="404 Base Miner Service", version="0.0.0")
@@ -91,10 +89,47 @@ app.router.lifespan_context = lifespan
 
 
 def generation_block(prompt_image: Image.Image, seed: int = -1):
-    """ Function for 3D data generation using provided image"""
+    """
+    Function for 3D data generation using Qwen-edited image.
+
+    This uses Qwen to edit the image with a specific prompt,
+    then uses Trellis2's single-image pipeline for 3D reconstruction.
+    """
+    # Prompt for Qwen image editing
+    edit_prompt = "Show this object in three-quarters view and make sure it is fully visible. Turn background neutral solid color contrasting with an object. Delete background details. Delete watermarks. Keep object colors. Sharpen image details"
 
     t_start = time()
-    mesh = app.state.trellis_generator.run(image=prompt_image, seed=seed, pipeline_type="1024_cascade")[0]
+
+    # Step 1: Edit image using Qwen
+    logger.info("Editing image with Qwen...")
+    edited_image = app.state.qwen_edit.edit_image(
+        prompt_image=prompt_image,
+        seed=seed,
+        prompt=edit_prompt
+    )
+
+    t_qwen = time()
+    logger.debug(f"Qwen image editing took: {(t_qwen - t_start)} secs.")
+
+    # Step 2: Use Trellis2 single-image pipeline (1 view original)
+    logger.info("Running Trellis2 single-image pipeline")
+    mesh = app.state.trellis_generator.run(
+        image=edited_image,
+        seed=seed,
+        pipeline_type="1024_cascade",
+        sparse_structure_sampler_params={
+            "steps": 12,
+            "guidance_strength": 7.5,
+        },
+        shape_slat_sampler_params={
+            "steps": 12,
+            "guidance_strength": 3.0,
+        },
+        tex_slat_sampler_params={
+            "steps": 12,
+            "guidance_strength": 3.0,
+        },
+    )[0]
     mesh.simplify()
 
     glb = o_voxel.postprocess.to_glb(
@@ -118,8 +153,9 @@ def generation_block(prompt_image: Image.Image, seed: int = -1):
     buffer.seek(0)
 
     t_get_model = time()
-    logger.debug(f"Model Generation took: {(t_get_model - t_start)} secs.")
+    logger.debug(f"Total Model Generation took: {(t_get_model - t_start)} secs.")
 
+    # Cleanup at end of generation (same pattern as refactored-spoon)
     clean_vram()
 
     t_gc = time()
@@ -129,8 +165,8 @@ def generation_block(prompt_image: Image.Image, seed: int = -1):
 
 
 @app.post("/generate")
-async def generate_model(prompt_image_file: UploadFile = File(...), seed: int = Form(-1)) -> Response:
-    """ Generates a 3D model as GLB file """
+async def generate_model(prompt_image_file: UploadFile = File(...), seed: int = Form()) -> Response:
+    """ Generates a 3D model as GLB file using Qwen-edited single image """
 
     logger.info("Task received. Prompt-Image")
 
@@ -168,5 +204,5 @@ def health_check() -> dict[str, str]:
 
 
 if __name__ == "__main__":
-    args: argparse.Namespace  = get_args()
+    args: argparse.Namespace = get_args()
     uvicorn.run(app, host=args.host, port=args.port, reload=False)
